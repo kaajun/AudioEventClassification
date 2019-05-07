@@ -11,7 +11,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from numpy import *
 
-
 from math import floor
 from tqdm import tqdm
 from speechpy import speechpy
@@ -19,7 +18,7 @@ from sklearn.preprocessing import LabelBinarizer
 from mlxtend.evaluate import confusion_matrix
 from mlxtend.plotting import plot_confusion_matrix
 
-CLASS_NUM = 4
+CLASS_NUM = 1
 
 def apply_cmvn(npy):
     return speechpy.processing.cmvnw(npy)
@@ -156,10 +155,10 @@ def define_model_etdnn():
     model = Model(inputs=input_layer, outputs=x)
     return model
     
-def train_and_save_model(model='xvector'):
+def train_and_save_model(model='xvector',binary_class=False,single_class='glass'):
     model = define_xvector()
     model.compile(loss='categorical_crossentropy', optimizer=SGD(lr=0.01), metrics=['acc', km.precision(label=1), km.recall(label=0)])
-    model.summary()
+    #model.summary()
     callback_list = [
         ModelCheckpoint('checkpoint-{epoch:02d}.h5', monitor='loss', verbose=1, save_best_only=True, period=2), # do the check point each epoch, and save the best model
         ReduceLROnPlateau(monitor='loss', patience=3, verbose=1, min_lr=1e-6), # reducing the learning rate if the val_loss is not improving
@@ -168,12 +167,18 @@ def train_and_save_model(model='xvector'):
     ]
     
     train_data, train_label = get_data(folder='training')
-    train_data, train_label = reduce_bg_data(train_data,train_label)
+    if binary_class == False:
+        train_data, train_label = reduce_bg_data(train_data,train_label)
+    else:
+        train_data,train_label = filter_reduce_bg(train_data,train_label,single_class)
     encoder = LabelBinarizer()
     train_label = encoder.fit_transform(train_label)
-    print("Start Training process \n Training data shape {} \n Training label shape {}".format(train_data.shape,train_label.shape))
+    print("Start Training process \nTraining data shape {} \nTraining label shape {}".format(train_data.shape,train_label.shape))
     model.fit(train_data, train_label, batch_size=32, epochs=25, verbose=1, validation_split=0.2)
-    model.save('re_xvector_model.h5')
+    if binary_class == False:
+        model.save('re_{}_model.h5'.format(model))
+    else:
+        model.save('re_{}_{}.h5'.format(model,single_class))
 
 def reduce_bg_data(data,label,percent=0.3,folder='training'):
     if not (os.path.isfile("re_{}_data_npy.npy".format(folder)) and os.path.isfile("re_{}_label_npy.npy".format(folder))):
@@ -192,121 +197,166 @@ def reduce_bg_data(data,label,percent=0.3,folder='training'):
         label = np.load("re_{}_label_npy.npy".format(folder))
     return data, label
 
+def filter_reduce_bg(data,label,classFilter,percent=0.1,folder='training'):
+    if classFilter == 'glass':
+        label_filter = 2
+    elif classFilter == 'gunshots':
+        label_filter = 3
+    else:
+        label_filter = 4
+    if not (os.path.isfile("re_{}_data_npy.npy".format(classFilter)) and os.path.isfile("re_{}_label_npy.npy".format(classFilter))):
+        df = pd.DataFrame(label,columns=['label'])
+        df['data'] = [ x for x in data]
+        #print(df['label'].value_counts())
+        df1 = df.loc[df['label']==1]
+        df1 = df1.sample(frac=percent)
+        df_total = pd.concat([df1,df.loc[df['label']==label_filter]])
+        data = np.array(df_total['data'].tolist())
+        label = df_total['label'].values
+        np.save("re_{}_data_npy.npy".format(classFilter),data)
+        np.save("re_{}_label_npy.npy".format(classFilter),label)
+    else:
+        data = np.load("re_{}_data_npy.npy".format(classFilter))     
+        label = np.load("re_{}_label_npy.npy".format(classFilter))
+    un, ct = np.unique(label, return_counts=True)
+    label_count = dict(zip(un,ct))
+    print("Bi-class training initiated! \nBackground training data = {}\n{} training data = {}".format(label_count[1],classFilter,label_count[label_filter]))
+    return data, label
 
-def load_and_predict_model(model='xvector'):
+
+
+
+def custom_test(model='re_xvector'):
+    window = 25
+    stride =10
+    npy = np.load("testing_npy/glass_00003_1_0035.npy")
     model = load_model('{}_model.h5'.format(model), custom_objects={'binary_precision': km.precision(label=1), 'binary_recall':km.recall(label=0)})
-    model.summary()
-    test_data, test_label = get_data(folder='testing')
-    encoder = LabelBinarizer()
-    test_label = encoder.fit_transform(test_label)
-    res = model.evaluate(test_data, test_label )
-    print(res)
-
-def load_and_predict_google_audio(model='xvector'):
-    model = load_model('{}_model.h5'.format(model), custom_objects={'binary_precision': km.precision(label=1), 'binary_recall':km.recall(label=0)})
-    labels = [ x[:-4] for x in os.listdir('google_testing_npy')]
-    
-    result = []
-    for label in labels:
-        if label == "background":
-            label_class = np.array([1,0,0,0])
-        elif label == "glass":
-            label_class = np.array([0,1,0,0])
-        elif label == "gunshot":
-            label_class = np.array([0,0,1,0])
-        else:
-            label_class = np.array([0,0,0,1])
-        print("Start prediction for {}".format(label))
-        directory = os.path.join('google_testing_npy',"{}_npy".format(label))
-        npys = os.listdir(directory)
-        for npy in tqdm(npys):
-            data = np.transpose(np.load(os.path.join("google_testing_npy/{}_npy".format(label),npy)))
-            data = data[newaxis,:,:]
-            pred = model.predict(data)
-            pred = np.ravel(pred.astype('int32'))
-            result.append((npy,pred,label_class,np.array_equal(pred,label_class)))
-    
-
-    report =  pd.DataFrame(result,columns=['NAME','PREDICTION','LABEL','RESULT'])
-    report.to_csv('google_test_result.csv',index=False)
-    print("The accuracy of the model is {}".format(str(float(report['RESULT'].sum())/len(report))))
-
-def load_and_predict_google_audio2(model='re_xvector'):
-    model = load_model('{}_model.h5'.format(model), custom_objects={'binary_precision': km.precision(label=1), 'binary_recall':km.recall(label=0)})
-    labels = [ x[:-4] for x in os.listdir('google_testing_npy')]
     encoder = LabelBinarizer()
     _ = encoder.fit_transform(np.array([1,2,3,4]))
-    result = []
-    y_pred = []
-    y_target = []
-    for label in labels:
-        if label == "background":
-            label_class = np.array([1])
-        elif label == "glass":
-            label_class = np.array([2])
-        elif label == "gunshot":
-            label_class = np.array([3])
+    _seg_data = []
+    _seg_label = []
+    npy_array = np.transpose(npy)
+    npy_array = apply_cmvn(npy_array)
+    dt_points = floor((npy_array.shape[0]-window)/stride) + 1
+    for ii in range(dt_points):
+        _seg_array = npy_array[ii*stride:ii*stride+window,:]
+        _seg_array = _seg_array[newaxis,:,:]
+        if len(_seg_data)==0 :
+            _seg_data = _seg_array
+            #_seg_label = label
         else:
-            label_class = np.array([4])
-        print("Start prediction for {}".format(label))
-        directory = os.path.join('google_testing_npy',"{}_npy".format(label))
-        npys = os.listdir(directory)
-        window = 25
-        stride = 10
-        
-        for npy in tqdm(npys):
+            _seg_data = np.concatenate([_seg_data,_seg_array],axis=0)
+            #_seg_label = np.concatenate([_seg_label,label],axis=0)
+        # last piece of array
+    _seg_array = npy_array[npy_array.shape[0]-window:npy_array.shape[0],:]
+    _seg_array = _seg_array[newaxis,:,:]
+    _seg_data = np.concatenate([_seg_data,_seg_array],axis=0)
+    #_seg_label = np.concatenate([_seg_label,label],axis=0)
+
+    #_seg_label = encoder.transform(_seg_label)
+    pred = model.predict(_seg_data)
+    print(pred)
+    np.save("pred_glass_00003_1_0035.npy",pred)
+
+def load_and_test(model='re_xvector',bg_filter=True,segmentize=True,testset='mivia'):
+    mstr = model
+    model = load_model('{}_model.h5'.format(model), custom_objects={'binary_precision': km.precision(label=1), 'binary_recall':km.recall(label=0)})
+    encoder = LabelBinarizer()
+    _ = encoder.fit_transform(np.array([1,2,3,4]))
+    if testset == 'mivia':
+        npys = os.listdir('testing_npy')
+        direc = 'testing_npy'
+    else:
+        npys = os.listdir('google_testing_npy')
+        direc = 'google_testing_npy'
+    labels = [ x.split("_")[0] for x in npys ]
+    labels = unique(labels).tolist()
+    npy_list = []
+    result = []
+    y_target = []
+    y_predicted = []
+    window = 25
+    stride = 10
+    if bg_filter == True:
+        bgstr = 'wobg'
+        try:
+            labels.remove('background')
+        except:
+            print("doens't have background data")
+        for npy in npys:
+            if (labels[0] in npy) or (labels[1] in npy) or (labels[2] in npy):
+                npy_list.append(npy)
+    else:
+        bgstr = 'withbg'
+        npy_list = npys
+         
+    for npy in tqdm(npy_list):
+        directory = os.path.join(direc,npy)
+        npy_array = np.transpose(np.load(directory))
+        npy_array = apply_cmvn(npy_array)
+        class_label = npy.split("_")[0]
+        if class_label == 'background':
+            label = np.array([1])
+        elif class_label == 'glass':
+            label = np.array([2])
+        elif class_label == 'gunshots':
+            label = np.array([3])
+        else:
+            label = np.array([4])
+        if segmentize == True:
+            sgstr = 'seg'
             _seg_data = []
             _seg_label = []
-            npy_array = np.transpose(np.load(os.path.join("google_testing_npy/{}_npy".format(label),npy)))
-            #data = data[newaxis,:,:]
             dt_points = floor((npy_array.shape[0]-window)/stride) + 1
             for ii in range(dt_points):
                 _seg_array = npy_array[ii*stride:ii*stride+window,:]
                 _seg_array = _seg_array[newaxis,:,:]
                 if len(_seg_data)==0 :
                     _seg_data = _seg_array
-                    _seg_label = label_class
+                    _seg_label = label
                 else:
                     _seg_data = np.concatenate([_seg_data,_seg_array],axis=0)
-                    _seg_label = np.concatenate([_seg_label,label_class],axis=0)
-                # last piece of array
-                _seg_array = npy_array[npy_array.shape[0]-window:npy_array.shape[0],:]
-                _seg_array = _seg_array[newaxis,:,:]
-                _seg_data = np.concatenate([_seg_data,_seg_array],axis=0)
-                _seg_label = np.concatenate([_seg_label,label_class],axis=0)
+                    _seg_label = np.concatenate([_seg_label,label],axis=0)
+            # last piece of array
+            _seg_array = npy_array[npy_array.shape[0]-window:npy_array.shape[0],:]
+            _seg_array = _seg_array[newaxis,:,:]
+            # join all together
+            _seg_data = np.concatenate([_seg_data,_seg_array],axis=0)
+            _seg_label = np.concatenate([_seg_label,label],axis=0)
             _seg_label = encoder.transform(_seg_label)
             pred = model.predict(_seg_data)
             pred = np.mean(pred, axis=0)
+            pred = np.ravel(pred)
             _seg_label = np.mean(_seg_label, axis=0)
-            y_pred.append(pred)
-            y_target.append(_seg_label)
-            result.append((npy,pred,np.around(pred),_seg_label,np.array_equal(np.around(pred),_seg_label)))
-
+        else:
+            sgstr = 'noseg'
+            npy_array = npy_array[newaxis,:,:]
+            pred = model.predict(npy_array)
+            pred = np.ravel(pred)
+            _seg_label = encoder.transform(label)
+            _seg_label = np.ravel(_seg_label)
+        a = [0,0,0,0]
+        idx = np.argmax(pred)
+        a[idx] = 1
+        pred_r = np.array(a)
+        y_predicted.append(pred_r)
+        y_target.append(_seg_label)
+        result.append((npy,pred,pred_r,_seg_label,np.array_equal(np.argmax(pred),np.argmax(_seg_label))))
     
     report =  pd.DataFrame(result,columns=['NAME','PREDICTION1','PREDICTION','LABEL','RESULT'])
-    report.to_csv('google_test_result2.csv',index=False)
+    
+    report.to_csv('{}_{}_test_{}_{}.csv'.format(bgstr,testset,mstr,sgstr),index=False)
     y_target = encoder.inverse_transform(np.array(y_target))
-    y_predicted = encoder.inverse_transform(np.array(y_pred))
+    y_predicted = encoder.inverse_transform(np.array(y_predicted))
     cm = confusion_matrix(y_target=y_target,y_predicted=y_predicted,binary=False)
     fig,ax = plot_confusion_matrix(conf_mat=cm)
     plt.show()
-    plt.savefig('confusion_matrix_google_re_xvector.png')
+    plt.savefig('{}_confusion_matrix_{}_{}_{}.png'.format(bgstr,testset,mstr,sgstr))
     print("The accuracy of the model is {}".format(str(float(report['RESULT'].sum())/len(report))))
-
-def load_and_test_wo_bg(model='xvector'):
-    #model = load_model('{}_model.h5'.format(model), custom_objects={'binary_precision': km.precision(label=1), 'binary_recall':km.recall(label=0)})
-    npys = os.listdir('testing_npy')
-    labels = [ x.split("_")[0] for x in npys ]
-    labels = unique(labels).tolist()
-    labels.remove('background')
-    npy_list = []
-    for npy in npys:
-        if (labels[0] in npy) or (labels[1] in npy) or (labels[2] in npy):
-            npy_list.append(npy)
     
 
 
 
 if __name__ == "__main__":
-    load_and_test_wo_bg()
+    load_and_test(model='re_xvector',bg_filter=False,segmentize=False,testset='google')
     
